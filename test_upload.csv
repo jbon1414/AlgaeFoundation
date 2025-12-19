@@ -1,0 +1,3 @@
+Year,First Name,Last Name,School Name,School District,School Address,City,State,Zip,County,Email,Title 1,PublicPrivate,Students Receiving Free_Reduced Lunch,ELL Students in Class,Returning Teacher,Total Students,Semester
+25/26,Test,Teacher1,Test School,Test District,1600 Pennsylvania Avenue NW,Washington,DC,20500,District of Columbia,test1@example.com,No,Public,15,No,No,100,Fall 2025
+25/26,Test,Teacher2,Another School,Test District,350 Fifth Avenue,New York,NY,10118,New York,test2@example.com,Yes,Public,75,Yes,Yes,200,Fall 2025

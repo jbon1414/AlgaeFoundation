@@ -3,6 +3,9 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+import requests
+import time
+from io import BytesIO
 
 # Page config
 st.set_page_config(
@@ -18,9 +21,10 @@ def check_password():
     
     def password_entered():
         """Checks whether a password entered by the user is correct."""
-        if st.session_state["password"] == "MarissaNalley":
+        if st.session_state.get("password", "") == "MarissaNalley":
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Don't store the password
+            if "password" in st.session_state:
+                del st.session_state["password"]  # Don't store the password
         else:
             st.session_state["password_correct"] = False
 
@@ -36,7 +40,7 @@ def check_password():
         key="password"
     )
     
-    if "password_correct" in st.session_state:
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
         st.error("😕 Password incorrect")
     
     return False
@@ -54,6 +58,150 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# Geocoding function
+def geocode_address(street, city, state, zip_code, country="USA"):
+    """
+    Geocode an address using Nominatim API
+    Returns tuple: (latitude, longitude, formatted_address)
+    """
+    base_url = "https://nominatim.openstreetmap.org/search"
+    
+    params = {
+        'street': str(street) if pd.notna(street) else '',
+        'city': str(city) if pd.notna(city) else '',
+        'state': str(state) if pd.notna(state) else '',
+        'postalcode': str(zip_code) if pd.notna(zip_code) else '',
+        'country': country,
+        'format': 'json',
+        'addressdetails': 1,
+        'limit': 1
+    }
+    
+    # Remove empty parameters
+    params = {k: v for k, v in params.items() if v}
+    
+    headers = {
+        'User-Agent': 'AlgaeFoundation-Dashboard/1.0'
+    }
+    
+    try:
+        response = requests.get(base_url, params=params, headers=headers, timeout=10)
+        
+        # Respect Nominatim usage policy: max 1 request per second
+        time.sleep(1)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                result = data[0]
+                return (
+                    float(result.get('lat', None)),
+                    float(result.get('lon', None)),
+                    result.get('display_name', '')
+                )
+    except Exception as e:
+        st.warning(f"Geocoding error for {street}, {city}: {str(e)}")
+    
+    return (None, None, None)
+
+# Upload and process data function
+def process_uploaded_file(uploaded_file, main_csv_path="Data for Glenwood Group.csv"):
+    """
+    Process uploaded file, geocode addresses, and append to main CSV
+    """
+    try:
+        # Read uploaded file
+        if uploaded_file.name.endswith('.csv'):
+            new_data = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+            new_data = pd.read_excel(uploaded_file)
+        else:
+            st.error("Unsupported file format. Please upload CSV or Excel file.")
+            return False
+        
+        st.info(f"Loaded {len(new_data)} rows from uploaded file")
+        
+        # Initialize geocoding columns if they don't exist
+        if 'Latitude' not in new_data.columns:
+            new_data['Latitude'] = None
+        if 'Longitude' not in new_data.columns:
+            new_data['Longitude'] = None
+        if 'Geocoded Address' not in new_data.columns:
+            new_data['Geocoded Address'] = None
+        
+        # Geocode addresses
+        st.info("Starting geocoding process...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        total_rows = len(new_data)
+        successful_geocodes = 0
+        
+        for idx, row in new_data.iterrows():
+            # Update progress
+            progress = (idx + 1) / total_rows
+            progress_bar.progress(progress)
+            status_text.text(f"Geocoding row {idx + 1} of {total_rows}...")
+            
+            # Get address components
+            street = row.get('School Address', '')
+            city = row.get('City', '')
+            state = row.get('State', '')
+            zip_code = row.get('Zip', '')
+            
+            # Skip if already geocoded
+            if pd.notna(row.get('Latitude')) and pd.notna(row.get('Longitude')):
+                successful_geocodes += 1
+                continue
+            
+            # Geocode
+            lat, lon, formatted_addr = geocode_address(street, city, state, zip_code)
+            
+            if lat is not None and lon is not None:
+                new_data.at[idx, 'Latitude'] = lat
+                new_data.at[idx, 'Longitude'] = lon
+                new_data.at[idx, 'Geocoded Address'] = formatted_addr
+                successful_geocodes += 1
+        
+        progress_bar.progress(1.0)
+        status_text.text(f"Geocoding complete! Successfully geocoded {successful_geocodes} of {total_rows} addresses")
+        
+        # Load existing data
+        try:
+            existing_data = pd.read_csv(main_csv_path)
+        except FileNotFoundError:
+            existing_data = pd.DataFrame()
+        
+        # Ensure new data has the same columns as existing data
+        if not existing_data.empty:
+            # Add missing columns to new_data
+            for col in existing_data.columns:
+                if col not in new_data.columns:
+                    new_data[col] = None
+            
+            # Add missing columns to existing_data
+            for col in new_data.columns:
+                if col not in existing_data.columns:
+                    existing_data[col] = None
+            
+            # Reorder columns to match
+            new_data = new_data[existing_data.columns]
+        
+        # Append new data to existing data
+        combined_data = pd.concat([existing_data, new_data], ignore_index=True)
+        
+        # Save to CSV
+        combined_data.to_csv(main_csv_path, index=False)
+        
+        st.success(f"✅ Successfully added {len(new_data)} rows to the dataset!")
+        st.success(f"📊 Total dataset now contains {len(combined_data)} rows")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
+        return False
 
 # Load and clean data
 @st.cache_data
@@ -217,6 +365,35 @@ elif returning_filter == "New Only":
 
 # Main page
 st.title("🧪 Algae Foundation Analytics Dashboard")
+st.markdown("---")
+
+# Upload Section
+with st.expander("📤 Upload New Data", expanded=False):
+    st.markdown("### Upload and Geocode New Teacher Data")
+    st.markdown("Upload a CSV or Excel file with new teacher data. Addresses will be automatically geocoded.")
+    
+    uploaded_file = st.file_uploader(
+        "Choose a file (CSV or Excel)",
+        type=['csv', 'xlsx', 'xls'],
+        help="Upload a file with teacher data. Must include columns: School Address, City, State, Zip"
+    )
+    
+    if uploaded_file is not None:
+        st.write(f"**Selected file:** {uploaded_file.name}")
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("🚀 Process and Add Data", type="primary"):
+                with st.spinner("Processing file..."):
+                    success = process_uploaded_file(uploaded_file)
+                    if success:
+                        st.balloons()
+                        # Clear cache to reload data
+                        st.cache_data.clear()
+                        st.rerun()
+        with col2:
+            st.info("⚠️ Note: Geocoding may take 1-2 seconds per address due to API rate limits")
+
 st.markdown("---")
 
 # Calculate key metrics (for use throughout the dashboard)
