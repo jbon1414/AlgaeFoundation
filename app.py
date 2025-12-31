@@ -6,6 +6,12 @@ import numpy as np
 import requests
 import time
 from io import BytesIO
+from supabase import create_client, Client
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Page config
 st.set_page_config(
@@ -47,6 +53,21 @@ def check_password():
 
 if not check_password():
     st.stop()  # Do not continue if check_password is not True
+
+# Initialize Supabase client
+@st.cache_resource
+def init_supabase():
+    """Initialize Supabase client"""
+    supabase_url = os.getenv("SUPABASE_API_URL")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    
+    if not supabase_url or not supabase_key:
+        st.error("⚠️ Supabase credentials not found. Please check your .env file.")
+        st.stop()
+    
+    return create_client(supabase_url, supabase_key)
+
+supabase = init_supabase()
 
 # Custom CSS
 st.markdown("""
@@ -106,9 +127,9 @@ def geocode_address(street, city, state, zip_code, country="USA"):
     return (None, None, None)
 
 # Upload and process data function
-def process_uploaded_file(uploaded_file, main_csv_path="Data for Glenwood Group.csv"):
+def process_uploaded_file(uploaded_file):
     """
-    Process uploaded file, geocode addresses, and append to main CSV
+    Process uploaded file, geocode addresses, and append to Supabase
     """
     try:
         # Read uploaded file
@@ -167,91 +188,131 @@ def process_uploaded_file(uploaded_file, main_csv_path="Data for Glenwood Group.
         progress_bar.progress(1.0)
         status_text.text(f"Geocoding complete! Successfully geocoded {successful_geocodes} of {total_rows} addresses")
         
-        # Load existing data
-        try:
-            existing_data = pd.read_csv(main_csv_path)
-        except FileNotFoundError:
-            existing_data = pd.DataFrame()
+        # Helper functions for data conversion
+        def to_bool(val):
+            if pd.isna(val):
+                return None
+            if isinstance(val, bool):
+                return val
+            val_str = str(val).strip().lower()
+            return val_str in ['yes', 'y', 'true', '1']
         
-        # Ensure new data has the same columns as existing data
-        if not existing_data.empty:
-            # Add missing columns to new_data
-            for col in existing_data.columns:
-                if col not in new_data.columns:
-                    new_data[col] = None
-            
-            # Add missing columns to existing_data
-            for col in new_data.columns:
-                if col not in existing_data.columns:
-                    existing_data[col] = None
-            
-            # Reorder columns to match
-            new_data = new_data[existing_data.columns]
+        def to_int(val):
+            if pd.isna(val):
+                return None
+            try:
+                return int(float(val))
+            except (ValueError, TypeError):
+                val_str = str(val).strip()
+                if val_str.lower() in ['yes', 'y', 'true']:
+                    return 100
+                if val_str.lower() in ['no', 'n', 'false']:
+                    return 0
+                return None
         
-        # Append new data to existing data
-        combined_data = pd.concat([existing_data, new_data], ignore_index=True)
+        # Prepare records for Supabase
+        st.info("Uploading to database...")
+        records = []
+        for idx, row in new_data.iterrows():
+            record = {
+                'year': str(row['Year']) if pd.notna(row.get('Year')) else None,
+                'first_name': str(row['First Name']) if pd.notna(row.get('First Name')) else None,
+                'last_name': str(row['Last Name']) if pd.notna(row.get('Last Name')) else None,
+                'school_name': str(row['School Name']) if pd.notna(row.get('School Name')) else None,
+                'school_district': str(row['School District']) if pd.notna(row.get('School District')) else None,
+                'school_address': str(row['School Address']) if pd.notna(row.get('School Address')) else None,
+                'city': str(row['City']) if pd.notna(row.get('City')) else None,
+                'state': str(row['State']) if pd.notna(row.get('State')) else None,
+                'zip': str(row['Zip']) if pd.notna(row.get('Zip')) else None,
+                'county': str(row['County']) if pd.notna(row.get('County')) else None,
+                'email': str(row['Email']) if pd.notna(row.get('Email')) else None,
+                'title_1': to_bool(row.get('Title 1')),
+                'public_private': str(row['PublicPrivate']) if pd.notna(row.get('PublicPrivate')) else None,
+                'students_receiving_free_reduced_lunch': to_int(row.get('Students Receiving Free_Reduced Lunch')),
+                'ell_students_in_class': to_bool(row.get('ELL Students in Class')),
+                'returning_teacher': to_bool(row.get('Returning Teacher')),
+                'total_students': to_int(row.get('Total Students')),
+                'semester': str(row['Semester']) if pd.notna(row.get('Semester')) else None,
+                'latitude': float(row['Latitude']) if pd.notna(row.get('Latitude')) else None,
+                'longitude': float(row['Longitude']) if pd.notna(row.get('Longitude')) else None,
+                'geocoded_address': str(row['Geocoded Address']) if pd.notna(row.get('Geocoded Address')) else None,
+            }
+            records.append(record)
         
-        # Save to CSV
-        combined_data.to_csv(main_csv_path, index=False)
+        # Upload to Supabase in batches
+        batch_size = 100
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            supabase.table('teacher_data').insert(batch).execute()
         
-        st.success(f"✅ Successfully added {len(new_data)} rows to the dataset!")
-        st.success(f"📊 Total dataset now contains {len(combined_data)} rows")
+        st.success(f"✅ Successfully added {len(new_data)} rows to the database!")
         
         return True
         
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
 
 # Load and clean data
-@st.cache_data
+@st.cache_data(ttl=60)  # Cache for 60 seconds to allow updates
 def load_data():
-    df = pd.read_csv("Data for Glenwood Group.csv")
-    
-    # Clean boolean columns
-    def clean_boolean(val):
-        if pd.isna(val):
-            return None
-        val_str = str(val).strip().lower()
-        return val_str in ['yes', 'y', 'true', '1']
-    
-    df['Title 1'] = df['Title 1'].apply(clean_boolean)
-    df['ELL Students in Class'] = df['ELL Students in Class'].apply(clean_boolean)
-    df['Returning Teacher'] = df['Returning Teacher'].apply(clean_boolean)
-    
-    # Clean percentage column
-    def clean_percentage(val):
-        if pd.isna(val):
-            return None
-        try:
-            return int(float(val))
-        except:
-            return None
-    
-    df['Students Receiving Free_Reduced Lunch'] = df['Students Receiving Free_Reduced Lunch'].apply(clean_percentage)
-    
-    # Clean school type
-    def clean_school_type(val):
-        if pd.isna(val):
-            return 'Unknown'
-        val_str = str(val).strip().lower()
-        if 'public' in val_str:
-            return 'Public'
-        elif 'private' in val_str:
-            return 'Private'
-        else:
-            return 'Other'
-    
-    df['PublicPrivate'] = df['PublicPrivate'].apply(clean_school_type)
-    
-    # Fill null text values with 'Unknown'
-    text_columns = ['First Name', 'Last Name', 'School Name', 'School District', 
-                   'School Address', 'City', 'State', 'Zip', 'County', 'Email', 'Semester']
-    for col in text_columns:
-        if col in df.columns:
-            df[col] = df[col].fillna('Unknown')
-    
-    return df
+    """Load data from Supabase"""
+    try:
+        # Fetch all data from Supabase
+        response = supabase.table('teacher_data').select('*').execute()
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(response.data)
+        
+        if df.empty:
+            st.warning("No data found in database")
+            return pd.DataFrame()
+        
+        # Rename columns to match original CSV format
+        column_mapping = {
+            'first_name': 'First Name',
+            'last_name': 'Last Name',
+            'school_name': 'School Name',
+            'school_district': 'School District',
+            'school_address': 'School Address',
+            'city': 'City',
+            'state': 'State',
+            'zip': 'Zip',
+            'county': 'County',
+            'email': 'Email',
+            'title_1': 'Title 1',
+            'public_private': 'PublicPrivate',
+            'students_receiving_free_reduced_lunch': 'Students Receiving Free_Reduced Lunch',
+            'ell_students_in_class': 'ELL Students in Class',
+            'returning_teacher': 'Returning Teacher',
+            'total_students': 'Total Students',
+            'semester': 'Semester',
+            'year': 'Year',
+            'latitude': 'Latitude',
+            'longitude': 'Longitude',
+            'geocoded_address': 'Geocoded Address'
+        }
+        
+        df = df.rename(columns=column_mapping)
+        
+        # Fill null text values with 'Unknown'
+        text_columns = ['First Name', 'Last Name', 'School Name', 'School District', 
+                       'School Address', 'City', 'State', 'Zip', 'County', 'Email', 'Semester']
+        for col in text_columns:
+            if col in df.columns:
+                df[col] = df[col].fillna('Unknown')
+        
+        # Ensure PublicPrivate has proper values
+        if 'PublicPrivate' in df.columns:
+            df['PublicPrivate'] = df['PublicPrivate'].fillna('Unknown')
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error loading data from Supabase: {str(e)}")
+        return pd.DataFrame()
 
 df = load_data()
 
@@ -372,27 +433,40 @@ with st.expander("📤 Upload New Data", expanded=False):
     st.markdown("### Upload and Geocode New Teacher Data")
     st.markdown("Upload a CSV or Excel file with new teacher data. Addresses will be automatically geocoded.")
     
-    uploaded_file = st.file_uploader(
-        "Choose a file (CSV or Excel)",
-        type=['csv', 'xlsx', 'xls'],
-        help="Upload a file with teacher data. Must include columns: School Address, City, State, Zip"
-    )
+    # Initialize processing state
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
     
-    if uploaded_file is not None:
-        st.write(f"**Selected file:** {uploaded_file.name}")
+    # Show success message if just completed
+    if st.session_state.processing_complete:
+        st.success("✅ Upload completed successfully! Data has been added to the database.")
+        if st.button("Upload Another File"):
+            st.session_state.processing_complete = False
+            st.rerun()
+    else:
+        uploaded_file = st.file_uploader(
+            "Choose a file (CSV or Excel)",
+            type=['csv', 'xlsx', 'xls'],
+            help="Upload a file with teacher data. Must include columns: School Address, City, State, Zip",
+            key="file_uploader"
+        )
         
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            if st.button("🚀 Process and Add Data", type="primary"):
-                with st.spinner("Processing file..."):
-                    success = process_uploaded_file(uploaded_file)
-                    if success:
-                        st.balloons()
-                        # Clear cache to reload data
-                        st.cache_data.clear()
-                        st.rerun()
-        with col2:
-            st.info("⚠️ Note: Geocoding may take 1-2 seconds per address due to API rate limits")
+        if uploaded_file is not None:
+            st.write(f"**Selected file:** {uploaded_file.name}")
+            
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if st.button("🚀 Process and Add Data", type="primary", key="process_button"):
+                    with st.spinner("Processing file..."):
+                        success = process_uploaded_file(uploaded_file)
+                        if success:
+                            # Mark processing as complete
+                            st.session_state.processing_complete = True
+                            # Clear cache to reload data
+                            st.cache_data.clear()
+                            st.rerun()
+            with col2:
+                st.info("⚠️ Note: Geocoding may take 1-2 seconds per address due to API rate limits")
 
 st.markdown("---")
 
@@ -464,6 +538,66 @@ fig_map.update_layout(
     plot_bgcolor='rgba(0,0,0,0)'
 )
 st.plotly_chart(fig_map, use_container_width=True)
+
+# Geocoded locations map
+st.subheader("Geocoded School Locations")
+
+# Filter for rows with valid coordinates
+geocoded_df = filtered_df[filtered_df['Latitude'].notna() & filtered_df['Longitude'].notna()].copy()
+
+if len(geocoded_df) > 0:
+    st.info(f"Showing {len(geocoded_df)} geocoded locations out of {len(filtered_df)} total schools")
+    
+    # Create hover text
+    geocoded_df['hover_text'] = (
+        '<b>' + geocoded_df['School Name'] + '</b><br>' +
+        geocoded_df['City'] + ', ' + geocoded_df['State'] + '<br>' +
+        'Teachers: 1<br>' +
+        'Students: ' + geocoded_df['Total Students'].astype(str)
+    )
+    
+    # Create density heatmap
+    fig_heatmap = go.Figure(go.Densitymapbox(
+        lat=geocoded_df['Latitude'].tolist(),
+        lon=geocoded_df['Longitude'].tolist(),
+        z=geocoded_df['Total Students'].tolist(),
+        radius=15,
+        colorscale='YlOrRd',
+        showscale=True,
+        hoverinfo='skip',
+        colorbar=dict(title="Students")
+    ))
+    
+    # Add scatter points on top
+    fig_heatmap.add_trace(go.Scattermapbox(
+        lat=geocoded_df['Latitude'].tolist(),
+        lon=geocoded_df['Longitude'].tolist(),
+        mode='markers',
+        marker=dict(
+            size=6,
+            color='rgb(0, 0, 139)',
+            opacity=0.6
+        ),
+        text=geocoded_df['hover_text'].tolist(),
+        hoverinfo='text',
+        name='Schools'
+    ))
+    
+    # Update layout
+    fig_heatmap.update_layout(
+        mapbox=dict(
+            style='open-street-map',
+            center=dict(lat=39.8283, lon=-98.5795),  # Center of USA
+            zoom=3
+        ),
+        height=600,
+        showlegend=False,
+        margin=dict(l=0, r=0, t=0, b=0)
+    )
+    
+    st.plotly_chart(fig_heatmap, use_container_width=True)
+else:
+    st.warning("No geocoded locations available to display on map")
 
 st.markdown("---")
 
