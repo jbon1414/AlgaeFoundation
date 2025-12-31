@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
 import requests
 import time
-from io import BytesIO
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
@@ -69,16 +67,29 @@ def init_supabase():
 
 supabase = init_supabase()
 
-# Custom CSS
-st.markdown("""
-<style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Helper functions for data conversion
+def to_bool(val):
+    """Convert value to boolean, handling various input formats."""
+    if pd.isna(val):
+        return None
+    if isinstance(val, bool):
+        return val
+    val_str = str(val).strip().lower()
+    return val_str in ['yes', 'y', 'true', '1']
+
+def to_int(val):
+    """Convert value to integer, handling various input formats."""
+    if pd.isna(val):
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        val_str = str(val).strip()
+        if val_str.lower() in ['yes', 'y', 'true']:
+            return 100
+        if val_str.lower() in ['no', 'n', 'false']:
+            return 0
+        return None
 
 # Geocoding function
 def geocode_address(street, city, state, zip_code, country="USA"):
@@ -187,28 +198,6 @@ def process_uploaded_file(uploaded_file):
         
         progress_bar.progress(1.0)
         status_text.text(f"Geocoding complete! Successfully geocoded {successful_geocodes} of {total_rows} addresses")
-        
-        # Helper functions for data conversion
-        def to_bool(val):
-            if pd.isna(val):
-                return None
-            if isinstance(val, bool):
-                return val
-            val_str = str(val).strip().lower()
-            return val_str in ['yes', 'y', 'true', '1']
-        
-        def to_int(val):
-            if pd.isna(val):
-                return None
-            try:
-                return int(float(val))
-            except (ValueError, TypeError):
-                val_str = str(val).strip()
-                if val_str.lower() in ['yes', 'y', 'true']:
-                    return 100
-                if val_str.lower() in ['no', 'n', 'false']:
-                    return 0
-                return None
         
         # Prepare records for Supabase
         st.info("Uploading to database...")
@@ -359,23 +348,6 @@ selected_school_types = st.sidebar.multiselect(
     default=school_types
 )
 
-# # Title 1 filter
-# title1_options = ["All", "Title 1 Only", "Non-Title 1 Only"]
-# title1_filter = st.sidebar.radio(
-#     "Title 1 Status",
-#     options=title1_options,
-#     index=0
-# )
-
-# Free/Reduced Lunch slider
-# frl_min = int(df['Students Receiving Free_Reduced Lunch'].min())
-# frl_max = int(df['Students Receiving Free_Reduced Lunch'].max())
-# frl_range = st.sidebar.slider(
-#     "% Free/Reduced Lunch",
-#     min_value=frl_min,
-#     max_value=frl_max,
-#     value=(frl_min, frl_max)
-# )
 
 # Student count slider
 student_min = int(df['Total Students'].min())
@@ -408,7 +380,6 @@ if selected_school_types:
 
 # Numeric filters
 filtered_df = filtered_df[
-    # (filtered_df['Students Receiving Free_Reduced Lunch'].between(frl_range[0], frl_range[1])) &
     (filtered_df['Total Students'].between(student_range[0], student_range[1]))
 ]
 
@@ -417,12 +388,6 @@ if returning_filter == "Returning Only":
     filtered_df = filtered_df[filtered_df['Returning Teacher'] == True]
 elif returning_filter == "New Only":
     filtered_df = filtered_df[filtered_df['Returning Teacher'] == False]
-
-# Title 1 filter
-# if title1_filter == "Title 1 Only":
-#     filtered_df = filtered_df[filtered_df['Title 1'] == True]
-# elif title1_filter == "Non-Title 1 Only":
-#     filtered_df = filtered_df[filtered_df['Title 1'] == False]
 
 # Main page
 st.title("🧪 Algae Foundation Analytics Dashboard")
@@ -483,12 +448,10 @@ with col1:
     st.metric("Total Teachers", f"{total_teachers:,}")
 
 with col2:
-    returning_pct = (returning_teachers / total_teachers * 100) if total_teachers > 0 else 0
-    st.metric("Returning Teachers", f"{returning_teachers:,}", )#f"{returning_pct:.1f}%")
+    st.metric("Returning Teachers", f"{returning_teachers:,}")
 
 with col3:
-    new_pct = (new_teachers / total_teachers * 100) if total_teachers > 0 else 0
-    st.metric("New Teachers", f"{new_teachers:,}",)# f"{new_pct:.1f}%")
+    st.metric("New Teachers", f"{new_teachers:,}")
 
 with col4:
     st.metric("Total Students", f"{total_students:,}")
@@ -518,7 +481,6 @@ fig_map = go.Figure(data=go.Choropleth(
     locationmode='USA-states',
     colorscale='YlOrRd',
     text=state_counts['text'].tolist(),
-    # marker_line_color='white',
     colorbar=dict(
         title=dict(text="Teachers")
     )
@@ -609,8 +571,6 @@ col1, col2 = st.columns(2)
 
 with col1:
     # Returning vs New pie chart
-    print(f"New Teachers: {new_teachers}, Returning Teachers: {returning_teachers}")
-    
     fig_returning = go.Figure(data=[go.Pie(
         labels=['New Teachers', 'Returning Teachers'],
         values=[new_teachers, returning_teachers],
@@ -625,7 +585,6 @@ with col2:
     # School type distribution
     school_type_counts = filtered_df['PublicPrivate'].value_counts().reset_index()
     school_type_counts.columns = ['School Type', 'Count']
-    print(f"School Type Counts:\n{school_type_counts}")
     
     fig_school_type = go.Figure(data=[go.Pie(
         labels=school_type_counts['School Type'].tolist(),
@@ -644,7 +603,6 @@ with col1:
     # Title 1 distribution
     title1_true = int((filtered_df['Title 1'] == True).sum())
     title1_false = int((filtered_df['Title 1'] == False).sum())
-    print(f"Title 1 - True: {title1_true}, False: {title1_false}")
     
     fig_title1 = go.Figure(data=[go.Bar(
         x=['Non-Title 1', 'Title 1'],
@@ -665,7 +623,6 @@ with col2:
     # ELL Students
     ell_true = int((filtered_df['ELL Students in Class'] == True).sum())
     ell_false = int((filtered_df['ELL Students in Class'] == False).sum())
-    print(f"ELL - True: {ell_true}, False: {ell_false}")
     
     fig_ell = go.Figure(data=[go.Bar(
         x=['No ELL Students', 'Has ELL Students'],
@@ -706,7 +663,6 @@ with col2:
     # Teachers by semester
     semester_counts = filtered_df['Semester'].value_counts().reset_index()
     semester_counts.columns = ['Semester', 'Count']
-    print(f"Semester Counts:\n{semester_counts}")
     
     fig_semester = go.Figure(data=[go.Bar(
         x=semester_counts['Semester'].tolist(),
